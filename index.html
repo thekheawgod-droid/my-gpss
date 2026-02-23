@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GPS Pro - Master Stable</title>
+    
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-app.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-database.js"></script>
+
+    <style>
+        /* ส่วนสำคัญ: กำหนดให้แผนที่เต็มจอและมีพื้นหลังสีเทากันขาวโพลน */
+        #map { height: 100vh; width: 100%; background: #e9ecef; position: absolute; top: 0; left: 0; z-index: 1; }
+        body { margin: 0; padding: 0; font-family: 'Kanit', sans-serif; overflow: hidden; }
+        
+        .ui-panel { 
+            position: absolute; top: 10px; right: 10px; z-index: 1000; 
+            background: rgba(255, 255, 255, 0.95); padding: 15px; border-radius: 12px; 
+            box-shadow: 0 4px 15px rgba(0,0,0,0.3); width: 260px; max-height: 90vh; overflow-y: auto; 
+        }
+        button { width: 100%; padding: 10px; margin-top: 8px; cursor: pointer; border: none; border-radius: 6px; color: white; font-weight: bold; transition: 0.3s; }
+        input { width: 85%; padding: 8px; margin-top: 5px; border: 1px solid #ddd; border-radius: 5px; }
+        .btn-blue { background-color: #0d6efd; }
+        .btn-green { background-color: #198754; }
+        .btn-red { background-color: #dc3545; }
+        .btn-dark { background-color: #212529; }
+        .config-box { background: #f1f3f5; padding: 12px; border-radius: 8px; margin-top: 10px; border: 1px solid #dee2e6; }
+        .status-text { font-size: 0.9em; margin-bottom: 5px; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <div class="ui-panel">
+        <div class="status-text">บอร์ด: <span id="status" style="color: gray;">กำลังเตรียมแผนที่...</span></div>
+        <small id="time">-</small>
+        <hr>
+        
+        <div class="config-box">
+            <b>⚙️ ตั้งค่าขอบเขต (Geofence)</b><br>
+            <label><small>รัศมี (เมตร):</small></label>
+            <input type="number" id="inputRadius" value="500">
+            <p style="font-size: 0.8em; margin: 5px 0;">พิกัดรั้ว: <span id="displayCenter">ยังไม่ได้เลือก</span></p>
+            <button class="btn-dark" id="btnToggleMode">🔓 เปิดโหมดจิ้มวางรั้ว</button>
+            <button class="btn-green" id="btnSaveFence">💾 บันทึกขอบเขต</button>
+        </div>
+
+        <button class="btn-blue" id="btnShowHistory">🚩 แสดงเส้นทางย้อนหลัง</button>
+        <button class="btn-red" id="btnDeleteDB">🗑️ ล้างฐานข้อมูล</button>
+    </div>
+
+    <div id="map"></div>
+
+    <script>
+        // 1. สร้างแผนที่ทันที (ห้ามรอ Firebase เพื่อกันหน้าจอขาว)
+        var map = L.map('map').setView([14.9874, 102.1180], 15);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+        
+        var marker = L.marker([14.9874, 102.1180]).addTo(map);
+        var polyline = L.polyline([], {color: 'red', weight: 4}).addTo(map);
+        var fenceCircle = L.circle([0, 0], {radius: 0, color: 'blue', fillOpacity: 0.1}).addTo(map);
+
+        // 2. Config Firebase
+        const firebaseConfig = {
+            apiKey: "AIzaSyA5PIqr8Ss64jcwjWEDSAl0l7huc3yjYtM",
+            databaseURL: "https://my-gps-tracker-2113a-default-rtdb.asia-southeast1.firebasedatabase.app",
+            projectId: "my-gps-tracker-2113a"
+        };
+        firebase.initializeApp(firebaseConfig);
+        const database = firebase.database();
+
+        let currentFence = { lat: 14.9874, lng: 102.1180, radius: 500 };
+        let isConfigMode = false;
+        let lastHeartbeat = 0;
+
+        // ดึงค่า Geofence จาก Firebase
+        database.ref('Settings/Geofence').on('value', (snapshot) => {
+            const data = snapshot.val();
+            if (data) {
+                currentFence = data;
+                fenceCircle.setLatLng([data.lat, data.lng]);
+                fenceCircle.setRadius(data.radius);
+                document.getElementById('inputRadius').value = data.radius;
+                document.getElementById('displayCenter').innerText = data.lat.toFixed(4) + ", " + data.lng.toFixed(4);
+            }
+        });
+
+        // เปิด-ปิดโหมดจิ้มวางรั้ว
+        document.getElementById('btnToggleMode').onclick = function() {
+            isConfigMode = !isConfigMode;
+            this.innerText = isConfigMode ? "🔒 ปิดโหมดจิ้ม (Lock)" : "🔓 เปิดโหมดจิ้มวางรั้ว";
+            this.style.backgroundColor = isConfigMode ? "#ffc107" : "#212529";
+            this.style.color = isConfigMode ? "black" : "white";
+        };
+
+        map.on('click', function(e) {
+            if (isConfigMode) {
+                currentFence.lat = e.latlng.lat;
+                currentFence.lng = e.latlng.lng;
+                fenceCircle.setLatLng([e.latlng.lat, e.latlng.lng]);
+                document.getElementById('displayCenter').innerText = e.latlng.lat.toFixed(4) + ", " + e.latlng.lng.toFixed(4);
+            }
+        });
+
+        document.getElementById('btnSaveFence').onclick = function() {
+            currentFence.radius = parseInt(document.getElementById('inputRadius').value);
+            database.ref('Settings/Geofence').set(currentFence).then(() => {
+                alert("บันทึกขอบเขตใหม่เรียบร้อย!");
+                isConfigMode = false;
+                document.getElementById('btnToggleMode').innerText = "🔓 เปิดโหมดจิ้มวางรั้ว";
+                document.getElementById('btnToggleMode').style.backgroundColor = "#212529";
+                document.getElementById('btnToggleMode').style.color = "white";
+            });
+        };
+
+        // รับพิกัดเรียลไทม์
+        database.ref('GPS').on('value', (snapshot) => {
+            const data = snapshot.val();
+            if (data && data.lat) {
+                const pos = [data.lat, data.lng];
+                marker.setLatLng(pos);
+                if (!isConfigMode) map.panTo(pos);
+
+                const dist = L.latLng(pos).distanceTo(L.latLng([currentFence.lat, currentFence.lng]));
+                if (dist > currentFence.radius) {
+                    document.getElementById('status').innerText = "ALARM: นอกเขต! (" + Math.round(dist) + "ม.)";
+                    document.getElementById('status').style.color = "red";
+                    fenceCircle.setStyle({color: 'red', fillColor: '#f03'});
+                } else {
+                    document.getElementById('status').innerText = "Online - ในเขต";
+                    document.getElementById('status').style.color = "green";
+                    fenceCircle.setStyle({color: 'blue', fillColor: '#30f'});
+                }
+                lastHeartbeat = Date.now();
+                document.getElementById('time').innerText = "ล่าสุด: " + new Date().toLocaleTimeString();
+            }
+        });
+
+        // แสดงประวัติย้อนหลัง
+        document.getElementById('btnShowHistory').onclick = function() {
+            database.ref('History').limitToLast(200).once('value', (s) => {
+                let p = [];
+                s.forEach(c => { if(c.val().lat) p.push([c.val().lat, c.val().lng]); });
+                if (p.length > 0) {
+                    polyline.setLatLngs(p);
+                    map.fitBounds(polyline.getBounds());
+                } else { alert("ไม่พบข้อมูลย้อนหลัง"); }
+            });
+        };
+
+        // ล้างฐานข้อมูล
+        document.getElementById('btnDeleteDB').onclick = function() {
+            if (confirm("ลบประวัติถาวร?")) {
+                database.ref('History').remove();
+                polyline.setLatLngs([]);
+                alert("ลบสำเร็จ!");
+            }
+        };
+
+        // ตรวจสอบ Offline
+        setInterval(() => {
+            if (lastHeartbeat > 0 && (Date.now() - lastHeartbeat > 20000)) {
+                document.getElementById('status').innerText = "Offline - ขาดการติดต่อ";
+                document.getElementById('status').style.color = "orange";
+            }
+        }, 5000);
+    </script>
+</body>
+</html>
